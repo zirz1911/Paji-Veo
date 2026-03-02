@@ -8,7 +8,7 @@ from api.client import VeoTask
 
 GENERATION_TYPES = {
     "Image→Video (1 frame)": "FIRST_AND_LAST_FRAMES_2_VIDEO",
-    "Image→Video (start only)": "IMAGE_2_VIDEO",
+    "Image→Video (reference)": "REFERENCE_2_VIDEO",
     "Text→Video": "TEXT_2_VIDEO",
 }
 MODELS = ["veo3_fast", "veo3"]

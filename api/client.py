@@ -9,7 +9,7 @@ import requests
 from utils.file import unique_filename, download_video
 
 
-BASE_URL = "https://kie.ai/api/v1"
+BASE_URL = "https://api.kie.ai/api/v1"
 
 
 @dataclass
@@ -42,20 +42,20 @@ class VeoClient:
             "model": task.model,
             "prompt": task.prompt,
             "generationType": task.generation_type,
-            "aspectRatio": task.aspect_ratio,
+            "aspect_ratio": task.aspect_ratio,
             "enableTranslation": task.enable_translation,
         }
         if task.seed is not None:
-            payload["seed"] = task.seed
+            payload["seeds"] = task.seed
         if task.watermark:
             payload["watermark"] = task.watermark
 
         if task.image_url:
             if task.generation_type == "FIRST_AND_LAST_FRAMES_2_VIDEO":
                 payload["imageUrls"] = [task.image_url, task.image_url]
-            elif task.generation_type == "IMAGE_2_VIDEO":
+            else:
                 payload["imageUrls"] = [task.image_url]
-            # TEXT_2_VIDEO — no imageUrls
+            # TEXT_2_VIDEO — no imageUrls (no image_url set)
 
         resp = self.session.post(f"{BASE_URL}/veo/generate", json=payload, timeout=60)
         resp.raise_for_status()
@@ -64,6 +64,19 @@ class VeoClient:
         if not task_id:
             raise RuntimeError(f"No taskId in response: {data}")
         return task_id
+
+    def get_record_info(self, task_id: str) -> Optional[dict]:
+        """Poll task status. Returns data dict, or None on error."""
+        try:
+            resp = self.session.get(
+                f"{BASE_URL}/veo/record-info",
+                params={"taskId": task_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data") or {}
+        except Exception:
+            return None
 
     def get_1080p(self, task_id: str) -> Optional[str]:
         """Poll once for the 1080P video URL. Returns URL or None if not ready."""
@@ -74,7 +87,8 @@ class VeoClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data.get("data", {}).get("resultUrl") or data.get("resultUrl")
+        inner = data.get("data") or {}
+        return inner.get("resultUrl") or inner.get("result_url")
 
     def run_task(
         self,
@@ -84,22 +98,37 @@ class VeoClient:
         poll_interval: int,
         on_status: Callable[[str], None],
     ) -> Path:
-        """Full flow: generate → wait → poll → download. Returns saved Path."""
+        """Full flow: generate → wait for completion → wait → poll 1080P → download."""
         on_status("generating")
         task_id = self.generate(task)
         task.task_id = task_id
 
+        # Step 1: wait for generation to complete (successFlag == 1)
+        max_gen_attempts = 48  # ~20 min at 25s intervals
+        for attempt in range(max_gen_attempts):
+            info = self.get_record_info(task_id)
+            if info and info.get("successFlag") == 1:
+                on_status("generated ✓")
+                break
+            if info and info.get("errorCode"):
+                raise RuntimeError(f"Generation failed: {info.get('errorMessage')}")
+            on_status(f"generating ({attempt + 1})")
+            time.sleep(poll_interval)
+        else:
+            raise RuntimeError("Generation timed out after max attempts")
+
+        # Step 2: wait before polling 1080P
         on_status(f"waiting {wait_minutes}m for 1080P")
         time.sleep(wait_minutes * 60)
 
-        on_status("polling")
+        # Step 3: poll for 1080P URL
         result_url = None
         max_attempts = 20
         for attempt in range(max_attempts):
             result_url = self.get_1080p(task_id)
             if result_url:
                 break
-            on_status(f"polling ({attempt + 1}/{max_attempts})")
+            on_status(f"polling 1080P ({attempt + 1}/{max_attempts})")
             time.sleep(poll_interval)
 
         if not result_url:
