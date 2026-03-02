@@ -1,9 +1,14 @@
+import os
 import requests
 
 
 def upload_to_catbox(filepath: str) -> str:
-    """Upload image to a free host. Tries catbox → litterbox → 0x0.st."""
-    return _try_catbox(filepath) or _try_litterbox(filepath) or _try_0x0(filepath)
+    """Upload image to a free host. Tries multiple services in order."""
+    for fn in (_try_catbox, _try_litterbox, _try_tmpfiles, _try_transfersh):
+        url = fn(filepath)
+        if url:
+            return url
+    raise RuntimeError("All upload hosts failed (catbox / litterbox / tmpfiles / transfer.sh)")
 
 
 def _try_catbox(filepath: str) -> str | None:
@@ -39,16 +44,39 @@ def _try_litterbox(filepath: str) -> str | None:
     return None
 
 
-def _try_0x0(filepath: str) -> str:
-    """0x0.st — free file host, no auth, permanent until unused."""
-    with open(filepath, "rb") as f:
-        r = requests.post(
-            "https://0x0.st",
-            files={"file": f},
-            timeout=60,
-        )
-    r.raise_for_status()
-    url = r.text.strip()
-    if not url.startswith("https://"):
-        raise RuntimeError(f"All upload hosts failed. Last response: {url}")
-    return url
+def _try_tmpfiles(filepath: str) -> str | None:
+    """tmpfiles.org — free, 24h retention, no auth."""
+    try:
+        with open(filepath, "rb") as f:
+            r = requests.post(
+                "https://tmpfiles.org/api/v1/upload",
+                files={"file": f},
+                timeout=30,
+            )
+        if r.ok:
+            data = r.json()
+            page_url = data.get("data", {}).get("url", "")
+            # convert https://tmpfiles.org/123/file.jpg → https://tmpfiles.org/dl/123/file.jpg
+            if page_url:
+                direct = page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/", 1)
+                return direct
+    except Exception:
+        pass
+    return None
+
+
+def _try_transfersh(filepath: str) -> str | None:
+    """transfer.sh — free, PUT binary, returns direct URL."""
+    try:
+        filename = os.path.basename(filepath)
+        with open(filepath, "rb") as f:
+            r = requests.put(
+                f"https://transfer.sh/{filename}",
+                data=f,
+                timeout=60,
+            )
+        if r.ok and r.text.strip().startswith("https://"):
+            return r.text.strip()
+    except Exception:
+        pass
+    return None
